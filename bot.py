@@ -4,25 +4,16 @@ from discord.ext import commands
 import sqlite3
 from datetime import datetime
 import asyncio
-import os
 import sys
 
-# Token z Environment Variables (Render)
-TOKEN = os.getenv("DISCORD_TOKEN")
+# 🔴 WPISZ SWÓJ TOKEN
+TOKEN = "DISCORD_TOKEN"
 
-# Jeśli brak tokena - wyłącz bot
-if not TOKEN:
-    print("❌ BRAK TOKENA! Dodaj DISCORD_TOKEN w Environment Variables na Render")
-    print("❌ Przejdź do: Render → Twój service → Environment")
-    print("❌ Dodaj: DISCORD_TOKEN = twój_token_z_discord_dev_portal")
-    sys.exit(1)
-
-# ID kanałów (zmień na swoje!)
+# ID kanałów
 FREE_SIGN_ID = 1454213320977551462
 TRANSFERS_ID = 1453884602312556667
 RANKING_CHANNEL_ID = 1454236491222876274
 
-# Konfiguracja klubów
 CLUBS = {
     "wislakrakow": {
         "name": "Wisła Kraków",
@@ -32,7 +23,7 @@ CLUBS = {
         "transfer_id": 1454214931397476534
     },
     "santos": {
-        "name": "Santos",
+        "name": "Santos", 
         "manager": "Prezes Santos",
         "color": discord.Color.dark_purple(),
         "saldo_id": 1454212811348508732,
@@ -40,7 +31,7 @@ CLUBS = {
     },
     "bazant": {
         "name": "Bażant Strzałkowo",
-        "manager": "Prezes Bażanta",
+        "manager": "Prezes Bażanta", 
         "color": discord.Color.green(),
         "saldo_id": 1454212880571564043,
         "transfer_id": 1454215083939860523
@@ -82,267 +73,331 @@ CLUBS = {
     }
 }
 
-# Inicjalizacja bota
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Funkcje pomocnicze
+# FUNKCJE EKONOMICZNE
 def init_db():
-    """Inicjalizacja bazy danych"""
-    try:
-        conn = sqlite3.connect('clubs.db')
-        c = conn.cursor()
-        
-        # Tabele
-        c.execute('''CREATE TABLE IF NOT EXISTS clubs (
-            club_name TEXT PRIMARY KEY, 
-            balance INTEGER DEFAULT 0, 
-            manager_role TEXT)''')
-            
-        c.execute('''CREATE TABLE IF NOT EXISTS players (
-            player_id TEXT, 
-            player_name TEXT, 
-            current_club TEXT, 
-            value INTEGER DEFAULT 1000, 
-            is_transfer_listed BOOLEAN DEFAULT 0, 
-            transfer_price INTEGER, 
-            listed_by TEXT, 
-            listed_at DATETIME)''')
-            
-        c.execute('''CREATE TABLE IF NOT EXISTS transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, 
-            club_from TEXT, 
-            club_to TEXT, 
-            amount INTEGER, 
-            reason TEXT, 
-            timestamp DATETIME, 
-            player_name TEXT)''')
-        
-        # Domyślne dane klubów
-        for club in CLUBS.values():
-            c.execute('''INSERT OR IGNORE INTO clubs (club_name, manager_role, balance) 
-                         VALUES (?, ?, ?)''', 
-                         (club['name'], club['manager'], 50000))
-        
-        conn.commit()
-        conn.close()
-        print("✅ Baza danych zainicjalizowana")
-    except Exception as e:
-        print(f"❌ Błąd bazy danych: {e}")
+    conn = sqlite3.connect('clubs.db')
+    c = conn.cursor()
+    
+    # Kluby
+    c.execute('''CREATE TABLE IF NOT EXISTS clubs 
+                 (club_name TEXT PRIMARY KEY, balance INTEGER DEFAULT 0, manager_role TEXT)''')
+    
+    # Gracze
+    c.execute('''CREATE TABLE IF NOT EXISTS players 
+                 (player_id TEXT, player_name TEXT, current_club TEXT, value INTEGER DEFAULT 1000,
+                  is_transfer_listed BOOLEAN DEFAULT 0, transfer_price INTEGER, 
+                  listed_by TEXT, listed_at DATETIME)''')
+    
+    # Transakcje
+    c.execute('''CREATE TABLE IF NOT EXISTS transactions 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, club_from TEXT, club_to TEXT, 
+                  amount INTEGER, reason TEXT, timestamp DATETIME, player_name TEXT)''')
+    
+    # Domyślne saldo 50000 dla każdego klubu
+    for club in CLUBS.values():
+        c.execute('''INSERT OR IGNORE INTO clubs (club_name, manager_role, balance) 
+                     VALUES (?, ?, ?)''', (club['name'], club['manager'], 50000))
+    
+    conn.commit()
+    conn.close()
+    print("✅ Baza danych z ekonomią gotowa")
 
-async def update_saldo_channel(club_id):
-    """Aktualizacja kanału salda"""
+async def update_saldo_channel(club_id: str):
+    """Aktualizuj kanał salda dla klubu"""
     if club_id not in CLUBS:
         return
     
-    config = CLUBS[club_id]
-    saldo_channel = bot.get_channel(config['saldo_id'])
+    club = CLUBS[club_id]
+    channel = bot.get_channel(club['saldo_id'])
     
-    if not saldo_channel:
-        print(f"❌ Nie znaleziono kanału saldo dla {config['name']}")
+    if not channel:
+        print(f"❌ Nie znaleziono kanału saldo dla {club['name']} (ID: {club['saldo_id']})")
         return
     
+    # Pobierz saldo z bazy
+    conn = sqlite3.connect('clubs.db')
+    c = conn.cursor()
+    c.execute("SELECT balance FROM clubs WHERE club_name = ?", (club['name'],))
+    result = c.fetchone()
+    balance = result[0] if result else 50000
+    conn.close()
+    
     try:
-        conn = sqlite3.connect('clubs.db')
-        c = conn.cursor()
-        c.execute("SELECT balance FROM clubs WHERE club_name = ?", (config['name'],))
-        result = c.fetchone()
-        balance = result[0] if result else 0
-        conn.close()
-        
         # Usuń stare wiadomości bota
-        try:
-            async for message in saldo_channel.history(limit=10):
-                if message.author == bot.user:
-                    await message.delete()
-        except:
-            pass
+        deleted = 0
+        async for message in channel.history(limit=20):
+            if message.author == bot.user:
+                await message.delete()
+                deleted += 1
+                await asyncio.sleep(0.5)
         
-        # Wyślij nowe saldo
-        embed = discord.Embed(
-            title=f"💰 SALDO: {config['name']}",
-            description=f"**Saldo:** `${balance:,}`",
-            color=config['color'],
-            timestamp=datetime.now()
-        )
-        embed.add_field(name="👨‍💼 Prezes", value=f"`{config['manager']}`", inline=True)
-        embed.set_footer(text="🔄 Aktualizowane automatycznie")
-        await saldo_channel.send(embed=embed)
-        
+        if deleted > 0:
+            print(f"✅ Usunięto {deleted} starych wiadomości z kanału {club['name']}")
+    except:
+        pass
+    
+    # Wyślij nowe saldo
+    embed = discord.Embed(
+        title=f"💰 SALDO: {club['name']}",
+        description=f"**Aktualne saldo:** `${balance:,}`",
+        color=club['color'],
+        timestamp=datetime.now()
+    )
+    embed.add_field(name="👨‍💼 Prezes", value=f"`{club['manager']}`", inline=True)
+    embed.set_footer(text="🔄 Aktualizowane automatycznie")
+    
+    try:
+        await channel.send(embed=embed)
+        print(f"✅ Zaktualizowano saldo dla {club['name']}: ${balance:,}")
     except Exception as e:
-        print(f"❌ Błąd aktualizacji saldo: {e}")
+        print(f"❌ Błąd wysyłania saldo dla {club['name']}: {e}")
 
 async def update_ranking_channel():
-    """Aktualizacja kanału rankingu"""
-    ranking_channel = bot.get_channel(RANKING_CHANNEL_ID)
+    """Aktualizuj kanał rankingu"""
+    channel = bot.get_channel(RANKING_CHANNEL_ID)
     
-    if not ranking_channel:
-        print("❌ Nie znaleziono kanału rankingu!")
+    if not channel:
+        print(f"❌ Nie znaleziono kanału rankingu (ID: {RANKING_CHANNEL_ID})")
         return
     
+    # Pobierz dane z bazy
+    conn = sqlite3.connect('clubs.db')
+    c = conn.cursor()
+    c.execute("SELECT club_name, balance FROM clubs ORDER BY balance DESC")
+    clubs = c.fetchall()
+    conn.close()
+    
     try:
-        conn = sqlite3.connect('clubs.db')
-        c = conn.cursor()
-        c.execute("SELECT club_name, balance FROM clubs ORDER BY balance DESC")
-        clubs = c.fetchall()
-        conn.close()
+        # Usuń stare wiadomości bota
+        deleted = 0
+        async for message in channel.history(limit=20):
+            if message.author == bot.user:
+                await message.delete()
+                deleted += 1
+                await asyncio.sleep(0.5)
         
-        # Usuń stare wiadomości
-        try:
-            async for message in ranking_channel.history(limit=10):
-                if message.author == bot.user:
-                    await message.delete()
-        except:
-            pass
-        
-        # Stwórz ranking
-        embed = discord.Embed(
-            title="🏆 RANKING KLUBÓW",
-            color=discord.Color.gold(),
-            timestamp=datetime.now()
+        if deleted > 0:
+            print(f"✅ Usunięto {deleted} starych wiadomości z rankingu")
+    except:
+        pass
+    
+    # Stwórz ranking
+    embed = discord.Embed(
+        title="🏆 RANKING KLUBÓW",
+        color=discord.Color.gold(),
+        timestamp=datetime.now()
+    )
+    
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣"]
+    
+    # Usuń duplikaty
+    seen = set()
+    unique_clubs = []
+    for name, bal in clubs:
+        if name not in seen:
+            seen.add(name)
+            unique_clubs.append((name, bal))
+    
+    # Dodaj do embeda
+    for idx, (name, bal) in enumerate(unique_clubs[:8]):
+        medal = medals[idx] if idx < len(medals) else f"{idx+1}."
+        embed.add_field(
+            name=f"{medal} {name}",
+            value=f"**${bal:,}**",
+            inline=False
         )
-        
-        medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣"]
-        
-        # Usuń duplikaty
-        seen = set()
-        unique_clubs = []
-        for name, bal in clubs:
-            if name not in seen:
-                seen.add(name)
-                unique_clubs.append((name, bal))
-        
-        # Dodaj do embeda
-        for idx, (name, bal) in enumerate(unique_clubs[:8]):
-            medal = medals[idx] if idx < len(medals) else f"{idx+1}."
-            embed.add_field(
-                name=f"{medal} {name}",
-                value=f"**${bal:,}**",
-                inline=False
-            )
-        
-        await ranking_channel.send(embed=embed)
-        
+    
+    # Wyślij ranking
+    try:
+        await channel.send(embed=embed)
+        print(f"✅ Zaktualizowano ranking ({len(unique_clubs)} klubów)")
     except Exception as e:
-        print(f"❌ Błąd aktualizacji rankingu: {e}")
+        print(f"❌ Błąd wysyłania rankingu: {e}")
 
-async def update_all_channels():
-    """Aktualizacja wszystkich kanałów"""
-    print("🔄 Aktualizowanie kanałów...")
+async def update_all_saldo_channels():
+    """Aktualizuj wszystkie kanały salda"""
+    print("🔄 Aktualizowanie wszystkich kanałów salda...")
     for club_id in CLUBS.keys():
         await update_saldo_channel(club_id)
-        await asyncio.sleep(0.5)
-    await update_ranking_channel()
-    print("✅ Wszystkie kanały zaktualizowane!")
+        await asyncio.sleep(1)  # Poczekaj 1 sekundę między aktualizacjami
+    print("✅ Wszystkie kanały salda zaktualizowane")
 
-# Eventy bota
+# KOMENDY EKONOMICZNE
+@bot.tree.command(name="dodaj_kase", description="Dodaj kasę klubowi (tylko admin)")
+@app_commands.describe(klub="Wybierz klub", kwota="Kwota do dodania", powód="Powód (np. wygrany mecz)")
+@app_commands.choices(klub=[
+    app_commands.Choice(name="Wisła Kraków", value="wislakrakow"),
+    app_commands.Choice(name="Santos", value="santos"),
+    app_commands.Choice(name="Bażant Strzałkowo", value="bazant"),
+    app_commands.Choice(name="As Roma", value="asroma"),
+    app_commands.Choice(name="UKS Kolorado", value="ukskolorado"),
+    app_commands.Choice(name="Chelsea", value="chelsea"),
+    app_commands.Choice(name="Fc Barcelona", value="fcbarcelona"),
+    app_commands.Choice(name="Juventus", value="juventus"),
+])
+async def dodaj_kase(interaction: discord.Interaction, klub: str, kwota: int, powód: str):
+    """Dodaj kasę klubowi"""
+    
+    # Sprawdź uprawnienia (Owner, Admin, Zarząd)
+    allowed_roles = ["Owner", "Admin", "Zarząd"]
+    if not any(role.name in allowed_roles for role in interaction.user.roles):
+        await interaction.response.send_message(
+            "❌ Brak uprawnień! Wymagana rola: Owner, Admin lub Zarząd",
+            ephemeral=True
+        )
+        return
+    
+    if klub not in CLUBS:
+        await interaction.response.send_message("❌ Nieznany klub!", ephemeral=True)
+        return
+    
+    club = CLUBS[klub]
+    
+    # Dodaj kasę w bazie
+    conn = sqlite3.connect('clubs.db')
+    c = conn.cursor()
+    
+    # Pobierz stare saldo
+    c.execute("SELECT balance FROM clubs WHERE club_name = ?", (club['name'],))
+    old_balance = c.fetchone()[0]
+    
+    # Zaktualizuj saldo
+    c.execute("UPDATE clubs SET balance = balance + ? WHERE club_name = ?", 
+              (kwota, club['name']))
+    
+    # Pobierz nowe saldo
+    c.execute("SELECT balance FROM clubs WHERE club_name = ?", (club['name'],))
+    new_balance = c.fetchone()[0]
+    
+    # Dodaj transakcję do historii
+    c.execute('''INSERT INTO transactions (club_from, club_to, amount, reason, timestamp) 
+                 VALUES (?, ?, ?, ?, ?)''',
+                 ("SYSTEM", club['name'], kwota, powód, datetime.now()))
+    
+    conn.commit()
+    conn.close()
+    
+    # Wyślij potwierdzenie
+    embed = discord.Embed(
+        title="💸 DODANO KASĘ",
+        color=discord.Color.green(),
+        timestamp=datetime.now()
+    )
+    embed.add_field(name="Klub", value=club['name'], inline=True)
+    embed.add_field(name="Kwota", value=f"`+${kwota:,}`", inline=True)
+    embed.add_field(name="\u200b", value="\u200b", inline=True)
+    embed.add_field(name="Stare saldo", value=f"`${old_balance:,}`", inline=True)
+    embed.add_field(name="Nowe saldo", value=f"`${new_balance:,}`", inline=True)
+    embed.add_field(name="\u200b", value="\u200b", inline=True)
+    embed.add_field(name="Powód", value=powód, inline=False)
+    embed.add_field(name="Dodał", value=interaction.user.mention, inline=True)
+    
+    await interaction.response.send_message(embed=embed)
+    
+    # Aktualizuj kanały
+    await update_saldo_channel(klub)
+    await update_ranking_channel()
+    
+    print(f"✅ Dodano ${kwota:,} do {club['name']} (teraz: ${new_balance:,})")
+
+@bot.tree.command(name="saldo", description="Sprawdź saldo klubu")
+@app_commands.describe(klub="Wybierz klub")
+@app_commands.choices(klub=[
+    app_commands.Choice(name="Wisła Kraków", value="wislakrakow"),
+    app_commands.Choice(name="Santos", value="santos"),
+    app_commands.Choice(name="Bażant Strzałkowo", value="bazant"),
+    app_commands.Choice(name="As Roma", value="asroma"),
+    app_commands.Choice(name="UKS Kolorado", value="ukskolorado"),
+    app_commands.Choice(name="Chelsea", value="chelsea"),
+    app_commands.Choice(name="Fc Barcelona", value="fcbarcelona"),
+    app_commands.Choice(name="Juventus", value="juventus"),
+])
+async def saldo(interaction: discord.Interaction, klub: str):
+    """Sprawdź saldo klubu"""
+    if klub not in CLUBS:
+        await interaction.response.send_message("❌ Nieznany klub!", ephemeral=True)
+        return
+    
+    club = CLUBS[klub]
+    
+    # Pobierz saldo z bazy
+    conn = sqlite3.connect('clubs.db')
+    c = conn.cursor()
+    c.execute("SELECT balance FROM clubs WHERE club_name = ?", (club['name'],))
+    result = c.fetchone()
+    balance = result[0] if result else 50000
+    conn.close()
+    
+    embed = discord.Embed(
+        title=f"💰 SALDO: {club['name']}",
+        color=club['color'],
+        timestamp=datetime.now()
+    )
+    embed.add_field(name="Saldo", value=f"**`${balance:,}`**", inline=False)
+    embed.add_field(name="Prezes", value=f"`{club['manager']}`", inline=True)
+    embed.set_footer(text=f"Sprawdzone przez {interaction.user.display_name}")
+    
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="aktualizuj_kanały", description="Aktualizuj wszystkie kanały (tylko admin)")
+async def aktualizuj_kanały(interaction: discord.Interaction):
+    """Ręczna aktualizacja kanałów"""
+    allowed_roles = ["Owner", "Admin", "Zarząd"]
+    if not any(role.name in allowed_roles for role in interaction.user.roles):
+        await interaction.response.send_message("❌ Brak uprawnień!", ephemeral=True)
+        return
+    
+    await interaction.response.send_message("🔄 Aktualizuję wszystkie kanały...")
+    
+    # Aktualizuj kanały
+    await update_all_saldo_channels()
+    await update_ranking_channel()
+    
+    await interaction.followup.send("✅ Wszystkie kanały zaktualizowane!")
+
+# Reszta komend (dodaj, usun, ranking, ping, sync) - zostaw bez zmian z poprzedniego kodu
+
 @bot.event
 async def on_ready():
-    """Bot gotowy"""
-    print("="*50)
-    print(f"✅ Bot zalogowany jako: {bot.user}")
+    print("="*60)
+    print(f"✅ Bot: {bot.user}")
     print(f"✅ ID: {bot.user.id}")
-    print(f"✅ Ping: {round(bot.latency * 1000)}ms")
-    print("="*50)
+    print("="*60)
     
-    # Inicjalizacja bazy
+    # Inicjalizuj bazę z ekonomią
     init_db()
     
     # Sync komend
     try:
         synced = await bot.tree.sync()
-        print(f"✅ Zsynchrowano {len(synced)} komend slash")
+        print(f"✅ Zsynchrowano {len(synced)} komend")
+        print(f"✅ Komendy ekonomiczne: /dodaj_kase, /saldo, /aktualizuj_kanały")
     except Exception as e:
-        print(f"❌ Błąd sync komend: {e}")
+        print(f"⚠️ Błąd sync: {e}")
     
-    # Aktualizuj kanały
-    await update_all_channels()
+    # Aktualizuj kanały po starcie
+    print("🔄 Aktualizowanie kanałów po starcie...")
+    await update_all_saldo_channels()
+    await update_ranking_channel()
     
-    print("🤖 Bot działa poprawnie na Render!")
+    print("🤖 Bot z ekonomią gotowy do działania!")
 
-# Komendy slash
-@bot.tree.command(name="sync", description="Ręczna synchronizacja komend (tylko admin)")
-async def sync(interaction: discord.Interaction):
-    """Ręczny sync komend"""
-    if interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("🔄 Synchronizacja komend...")
-        try:
-            synced = await bot.tree.sync()
-            await interaction.followup.send(f"✅ Zsynchrowano {len(synced)} komend")
-        except Exception as e:
-            await interaction.followup.send(f"❌ Błąd: {e}")
-    else:
-        await interaction.response.send_message("❌ Brak uprawnień!", ephemeral=True)
-
-@bot.tree.command(name="ping", description="Sprawdź ping bota")
-async def ping(interaction: discord.Interaction):
-    """Komenda ping"""
-    await interaction.response.send_message(f"🏓 Pong! {round(bot.latency * 1000)}ms")
-
-@bot.tree.command(name="ranking", description="Pokaż ranking klubów")
-async def ranking(interaction: discord.Interaction):
-    """Wyświetl ranking"""
-    try:
-        conn = sqlite3.connect('clubs.db')
-        c = conn.cursor()
-        c.execute("SELECT club_name, balance FROM clubs ORDER BY balance DESC")
-        clubs = c.fetchall()
-        conn.close()
-        
-        embed = discord.Embed(
-            title="🏆 RANKING KLUBÓW",
-            color=discord.Color.gold(),
-            timestamp=datetime.now()
-        )
-        
-        medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣"]
-        
-        seen = set()
-        unique_clubs = []
-        for name, bal in clubs:
-            if name not in seen:
-                seen.add(name)
-                unique_clubs.append((name, bal))
-        
-        for idx, (name, bal) in enumerate(unique_clubs[:8]):
-            medal = medals[idx] if idx < len(medals) else f"{idx+1}."
-            embed.add_field(
-                name=f"{medal} {name}",
-                value=f"**${bal:,}**",
-                inline=False
-            )
-        
-        if len(unique_clubs) > 8:
-            other_text = "\n".join([
-                f"{idx+9}. {name}: ${bal:,}" 
-                for idx, (name, bal) in enumerate(unique_clubs[8:])
-            ])
-            embed.add_field(name="📊 Pozostałe", value=other_text, inline=False)
-        
-        await interaction.response.send_message(embed=embed)
-        
-    except Exception as e:
-        await interaction.response.send_message(f"❌ Błąd: {e}", ephemeral=True)
-
-# Pozostałe komendy z twojego kodu...
-# (TUTAJ WKLEJ RESZTĘ SWOICH KOMEND: dodaj, usun, wystaw, kup, etc.)
-
-# Uruchomienie bota
+# Uruchomienie
 if __name__ == "__main__":
-    print("🚀 Uruchamianie bota klubów piłkarskich...")
-    print(f"📊 Ilość klubów: {len(CLUBS)}")
-    print(f"🔑 Token: {'*' * len(TOKEN) if TOKEN else 'BRAK'}")
+    print("🚀 Uruchamianie bota z ekonomią...")
     
-    if not TOKEN:
-        print("❌ PRZERWANO: Brak tokena Discord")
-        print("ℹ️ Dodaj DISCORD_TOKEN w Environment Variables na Render")
-    else:
-        try:
-            bot.run(TOKEN)
-        except discord.errors.LoginFailure:
-            print("❌ BŁĄD LOGOWANIA: Nieprawidłowy token Discord")
-            print("ℹ️ Sprawdź czy token jest poprawny w Discord Dev Portal")
-        except Exception as e:
-            print(f"❌ NIESPODZIEWANY BŁĄD: {e}")
+    if not TOKEN or TOKEN == "DISCORD_TOKEN":
+        print("❌ WPISZ SWÓJ TOKEN W LINIJCE 10!")
+        sys.exit(1)
+    
+    try:
+        bot.run(TOKEN)
+    except discord.errors.LoginFailure:
+        print("❌ TOKEN NIEPOPRAWNY! Zresetuj w Discord Dev Portal")
+    except Exception as e:
+        print(f"❌ Błąd: {e}")
